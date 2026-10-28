@@ -1,21 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Anaconda Navigator 简体中文汉化引擎（外挂式）
+"""Anaconda Navigator display-text translation (external runtime patch).
 
-设计要点
---------
-1. **不改动 anaconda_navigator 的任何源码文件**。本模块在 Navigator 启动前
-   被 import，运行期给 PySide6/Shiboken 的类方法打补丁：在静态文案进入 Qt
-   之前把英文换成中文。conda 升级覆盖 site-packages 时汉化不受影响。
-2. **只 patch「静态文案」入口**（setText / setWindowTitle / addTab / addAction
-   / setPlaceholderText ...）。绝不做子串替换，只做整串精确匹配，因此环境名、
-   包名、路径、频道 URL 永远不会被改写。
-3. **QComboBox 双参数 addItem 才翻译**。单参数 addItems(list) 在 C++ 层循环，
-   不经过 Python 补丁 —— 这正是包管理器过滤器要的行为：
-   `widgets/manager/table.py:295` 用 `currentText()` 去查 `COMBOBOX_VALUES`
-   字典，显示文本一旦变成中文，包过滤会静默失效。所以那条路径保持英文。
-   而 `widgets/tabs/home.py:194` 的 `addItem(verbose_name, userData)` 逻辑走
-   itemData，翻译显示文本完全安全。
-4. 幂等：重复 import 只生效一次。
+Editable values and generic combobox items are data, not translation targets.
+Only Navigator's dedicated ComboHomeFilter has translated item labels. Every
+method replacement is recorded and restored on failure or uninstall(); no
+anaconda_navigator package file is modified. Compatibility is tested per version,
+not guaranteed for arbitrary future Qt/Navigator releases.
 """
 
 from __future__ import annotations
@@ -177,187 +167,232 @@ def _trace(source: str, target: str) -> None:
         pass
 
 
-def _tr_args(args: tuple) -> tuple:
-    """翻一个位置参数元组里的所有 str（用于 addTab / addAction 这类）。"""
-    return tuple(tr(item) for item in args)
+# Only these exact label/value pairs on Navigator's dedicated application filter
+# are presentation strings. A generic addItem(str, str) may contain an env name.
+_APP_FILTER_LABELS: typing.Final[dict[str, str]] = {
+    'all': 'All applications',
+    'installed': 'Installed applications',
+    'uninstalled': 'Not installed applications',
+    'updatable': 'Updatable applications',
+}
+
+
+def tr_app_filter(text: typing.Any, user_data: typing.Any) -> typing.Any:
+    """Translate a verified static filter label without touching its logical key."""
+    if isinstance(user_data, str) and _APP_FILTER_LABELS.get(user_data) == text:
+        return tr(text)
+    return text
+
+
+def _is_app_filter(widget: typing.Any) -> bool:
+    return any(cls.__name__ == 'ComboHomeFilter'
+               and cls.__module__ == 'anaconda_navigator.widgets.tabs.home'
+               for cls in type(widget).__mro__)
+
+
+def _preserve_data_text(widget: typing.Any, args: tuple = (), kwargs: dict | None = None) -> bool:
+    """Protect environment labels and the QAction-based popup of data combos."""
+    if any(cls.__name__ == 'ButtonEnvironmentName'
+           and cls.__module__ == 'anaconda_navigator.widgets.lists.environments'
+           for cls in type(widget).__mro__):
+        return True
+    candidates = [widget, *args]
+    if kwargs and kwargs.get('parent') is not None:
+        candidates.append(kwargs['parent'])
+    for candidate in candidates:
+        seen = set()
+        while candidate is not None and id(candidate) not in seen:
+            seen.add(id(candidate))
+            if any(cls.__name__ == 'QComboBox' and cls.__module__ == 'PySide6.QtWidgets'
+                   for cls in type(candidate).__mro__):
+                return not _is_app_filter(candidate)
+            try:
+                candidate = candidate.parent()
+            except (AttributeError, RuntimeError, TypeError):
+                break  # constructors may not yet have initialized their QObject
+    return False
 
 
 _APPLIED: bool = False
+# (class, attribute, originally owned here, original own value). Inherited
+# attributes must be deleted on restore, not shadowed with an inherited method.
+_PATCHES: list[tuple[type, str, bool, typing.Any]] = []
+
+
+def _patch(cls: type, name: str, replacement: typing.Any) -> None:
+    owned = name in vars(cls)
+    original = vars(cls).get(name)
+    setattr(cls, name, replacement)
+    _PATCHES.append((cls, name, owned, original))
+
+
+def uninstall() -> None:
+    """Restore exact pre-install attributes, including inherited ownership."""
+    global _APPLIED
+    remaining = []
+    errors = []
+    for cls, name, owned, original in reversed(_PATCHES):
+        try:
+            if owned:
+                setattr(cls, name, original)
+            else:
+                delattr(cls, name)
+        except Exception as exc:
+            remaining.append((cls, name, owned, original))
+            errors.append(f'{cls.__name__}.{name}: {exc!r}')
+    _PATCHES[:] = reversed(remaining)
+    _APPLIED = bool(remaining)
+    if errors:
+        raise RuntimeError('Patch restore failed: ' + '; '.join(errors))
 
 
 def apply() -> None:
-    """给 Qt 类方法打补丁。幂等。"""
+    """Install atomically; any installation exception restores earlier changes."""
     global _APPLIED
     if _APPLIED:
         return
+    if _PATCHES:
+        uninstall()
+    try:
+        _install_patches()
+    except BaseException:
+        uninstall()
+        raise
+    _APPLIED = True
 
-    from PySide6 import QtGui, QtWidgets  # noqa: PLC0415
+
+def _install_patches() -> None:
+    from PySide6 import QtGui, QtWidgets
 
     def wrap_set_text(cls: type, name: str, index: int = 0) -> None:
-        """把 cls.name 的第 index 个位置参数翻译掉。"""
         original = getattr(cls, name, None)
         if original is None or getattr(original, '_zhcn', False):
             return
 
-        def patched(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        def patched(self, *args, **kwargs):
+            if _preserve_data_text(self):
+                return original(self, *args, **kwargs)
             if len(args) > index:
-                args = list(args)
-                args[index] = tr(args[index])
-                args = tuple(args)
+                changed = list(args)
+                changed[index] = tr(changed[index])
+                args = tuple(changed)
             for key in ('text', 'title', 'label', 'caption', 'message'):
-                if key in kwargs and isinstance(kwargs[key], str):
+                if key in kwargs:
                     kwargs[key] = tr(kwargs[key])
             return original(self, *args, **kwargs)
 
-        patched._zhcn = True  # type: ignore[attr-defined]
+        patched._zhcn = True
         patched.__name__ = f'{name}_zhcn'
-        setattr(cls, name, patched)
+        _patch(cls, name, patched)
 
-    # --- 单参数文案入口（最常用）
-    for cls in (
-        QtWidgets.QLabel,
-        QtWidgets.QAbstractButton,      # QPushButton / QCheckBox / QRadioButton / QToolButton
-        QtWidgets.QWidget,              # setWindowTitle 在这里，所有控件继承
-        QtWidgets.QLineEdit,
-        QtWidgets.QTextEdit,
-        QtWidgets.QTextBrowser,
-        QtWidgets.QPlainTextEdit,
-        QtWidgets.QGroupBox,
-        QtWidgets.QMessageBox,
-        QtWidgets.QCheckBox,
-        QtWidgets.QRadioButton,
-        QtWidgets.QPushButton,
-        QtWidgets.QToolButton,
-        QtWidgets.QMenu,
-        QtWidgets.QMenuBar,
-        QtWidgets.QStatusBar,
-        QtWidgets.QProgressBar,
-        QtGui.QAction,
-    ):
-        wrap_set_text(cls, 'setText')
-        wrap_set_text(cls, 'setTitle')
-        wrap_set_text(cls, 'setWindowTitle')
-        wrap_set_text(cls, 'setToolTip')
-        wrap_set_text(cls, 'setStatusTip')
-        wrap_set_text(cls, 'setWhatsThis')
+    # Do not translate the actual content of input editors/log viewers.
+    for cls in (QtWidgets.QLabel, QtWidgets.QAbstractButton, QtWidgets.QGroupBox,
+                QtWidgets.QMessageBox, QtWidgets.QMenu, QtWidgets.QStatusBar,
+                QtWidgets.QProgressBar, QtGui.QAction):
+        for name in ('setText', 'setTitle', 'setInformativeText', 'setDetailedText', 'showMessage'):
+            wrap_set_text(cls, name)
+    # These QWidget display attributes are inherited by all relevant controls.
+    for name in ('setWindowTitle', 'setToolTip', 'setStatusTip', 'setWhatsThis'):
+        wrap_set_text(QtWidgets.QWidget, name)
+    for cls in (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit):
         wrap_set_text(cls, 'setPlaceholderText')
-        wrap_set_text(cls, 'setInformativeText')
-        wrap_set_text(cls, 'setDetailedText')
-        wrap_set_text(cls, 'showMessage')
+    for name in ('setToolTip', 'setStatusTip', 'setWhatsThis'):
+        wrap_set_text(QtGui.QAction, name)
 
-    # --- 表头 / 列表头（文案是 str 列表）
     def wrap_header(cls: type, name: str) -> None:
         original = getattr(cls, name, None)
-        if original is None or getattr(original, '_zhcn', False):
+        if original is None:
             return
 
-        def patched(self, labels, *args, **kwargs):  # noqa: ANN001, ANN202
+        def patched(self, labels, *args, **kwargs):
             if isinstance(labels, (list, tuple)):
                 labels = [tr(item) for item in labels]
             return original(self, labels, *args, **kwargs)
 
-        patched._zhcn = True  # type: ignore[attr-defined]
-        setattr(cls, name, patched)
+        patched._zhcn = True
+        _patch(cls, name, patched)
 
     for cls in (QtWidgets.QTableWidget, QtWidgets.QTreeWidget, QtGui.QStandardItemModel):
-        wrap_header(cls, 'setHorizontalHeaderLabels')
-        wrap_header(cls, 'setVerticalHeaderLabels')
+        for name in ('setHorizontalHeaderLabels', 'setVerticalHeaderLabels'):
+            wrap_header(cls, name)
 
-    # --- addTab(widget, text)：注意 text 是**第 2 个**位置参数
-    for cls in (QtWidgets.QTabWidget,):
-        original_add_tab = cls.addTab
-        if not getattr(original_add_tab, '_zhcn', False):
-            def patched_add_tab(self, widget, text='', *args, **kwargs):  # noqa: ANN001, ANN202
-                return original_add_tab(self, widget, tr(text), *args, **kwargs)
+    original_add_tab = QtWidgets.QTabWidget.addTab
 
-            patched_add_tab._zhcn = True  # type: ignore[attr-defined]
-            cls.addTab = patched_add_tab
-        wrap_set_text(cls, 'setTabText', index=1)
+    def patched_add_tab(self, *args, **kwargs):
+        changed = list(args)
+        # (widget, label) and (widget, icon, label) are different Qt overloads.
+        index = 1 if len(changed) > 1 and isinstance(changed[1], str) else 2
+        if len(changed) > index:
+            changed[index] = tr(changed[index])
+        for key in ('text', 'label'):
+            if key in kwargs:
+                kwargs[key] = tr(kwargs[key])
+        return original_add_tab(self, *changed, **kwargs)
 
-    # --- QMenu.addAction 重载多：只在遇到 str 时翻译，QAction 参数原样透传
-    original_add_action = QtWidgets.QMenu.addAction
-    if not getattr(original_add_action, '_zhcn', False):
-        def patched_add_action(self, *args, **kwargs):  # noqa: ANN001, ANN202
-            if args and isinstance(args[0], str):
-                args = (tr(args[0]),) + args[1:]
-            elif len(args) > 1 and isinstance(args[1], str):
-                args = (args[0], tr(args[1])) + args[2:]
-            return original_add_action(self, *args, **kwargs)
+    _patch(QtWidgets.QTabWidget, 'addTab', patched_add_tab)
+    wrap_set_text(QtWidgets.QTabWidget, 'setTabText', 1)
 
-        patched_add_action._zhcn = True  # type: ignore[attr-defined]
-        QtWidgets.QMenu.addAction = patched_add_action
+    def wrap_first_text(cls: type, name: str) -> None:
+        original = getattr(cls, name)
 
-    # --- 构造函数入口：Navigator 大量控件是 `QLabel('Ok')` / `ButtonPrimary('Ok')`
-    #     / `QAction('&Copy', parent)` 这样「文案直接在构造函数里」创建的
-    #     （如 widgets/dialogs/__init__.py:337-346、utils/qthelpers.py:73）。
-    #     只 patch 文案型控件；QWidget/QDialog 等不接受文案的类不碰。
-    def wrap_init(cls: type) -> None:
-        original = cls.__init__
-        if getattr(original, '_zhcn', False):
-            return
-
-        def patched_init(self, *args, **kwargs):  # noqa: ANN001, ANN202
-            if args and isinstance(args[0], str):
-                args = (tr(args[0]),) + args[1:]
+        def patched(self, *args, **kwargs):
+            if not _preserve_data_text(self, args, kwargs):
+                changed = list(args)
+                for index in range(min(2, len(changed))):
+                    if isinstance(changed[index], str):
+                        changed[index] = tr(changed[index])
+                        break
+                args = tuple(changed)
+                for key in ('text', 'title'):
+                    if key in kwargs:
+                        kwargs[key] = tr(kwargs[key])
             return original(self, *args, **kwargs)
 
-        patched_init._zhcn = True  # type: ignore[attr-defined]
-        cls.__init__ = patched_init
+        patched._zhcn = True
+        _patch(cls, name, patched)
 
-    for cls in (
-        QtGui.QAction,
-        QtWidgets.QLabel,
-        QtWidgets.QPushButton,
-        QtWidgets.QCheckBox,
-        QtWidgets.QRadioButton,
-        QtWidgets.QGroupBox,
-        QtWidgets.QToolButton,
-    ):
-        wrap_init(cls)
+    wrap_first_text(QtWidgets.QMenu, 'addAction')
+    wrap_first_text(QtWidgets.QMenuBar, 'addMenu')
+    for cls in (QtGui.QAction, QtWidgets.QLabel, QtWidgets.QPushButton,
+                QtWidgets.QCheckBox, QtWidgets.QRadioButton, QtWidgets.QGroupBox,
+                QtWidgets.QToolButton):
+        wrap_first_text(cls, '__init__')
 
-    # --- QComboBox.addItem：**只有双参数形式**（带 userData）才翻译。
-    #     单参数 / addItems(list) 一律不动 —— 见文件头第 3 条。
     original_add_item = QtWidgets.QComboBox.addItem
-    if not getattr(original_add_item, '_zhcn', False):
-        def patched_add_item(self, *args, **kwargs):  # noqa: ANN001, ANN202
-            if len(args) == 2 and isinstance(args[0], str) and isinstance(args[1], str):
-                # (text, userData=str)：userData 是逻辑值，绝不能碰
-                args = (tr(args[0]), args[1])
-            return original_add_item(self, *args, **kwargs)
 
-        patched_add_item._zhcn = True  # type: ignore[attr-defined]
-        QtWidgets.QComboBox.addItem = patched_add_item
+    def patched_add_item(self, *args, **kwargs):
+        if _is_app_filter(self):
+            changed = list(args)
+            if len(changed) == 2 and isinstance(changed[0], str):
+                changed[0] = tr_app_filter(changed[0], changed[1])
+            elif len(changed) == 3 and isinstance(changed[1], str):
+                changed[1] = tr_app_filter(changed[1], changed[2])
+            elif len(changed) == 1 and 'userData' in kwargs:
+                changed[0] = tr_app_filter(changed[0], kwargs['userData'])
+            elif 'text' in kwargs and 'userData' in kwargs:
+                kwargs['text'] = tr_app_filter(kwargs['text'], kwargs['userData'])
+            args = tuple(changed)
+        return original_add_item(self, *args, **kwargs)
 
-    # --- QMenuBar.addMenu(title) / addMenu(QMenu)：菜单栏标题
-    #     widgets/main_window/__init__.py:659 `menubar.addMenu('&File')`、
-    #     :664 `menubar.addMenu('&Help')` —— 之前漏了，所以 File/Help 一直是英文。
-    original_add_menu = QtWidgets.QMenuBar.addMenu
-    if not getattr(original_add_menu, '_zhcn', False):
-        def patched_add_menu(self, *args, **kwargs):  # noqa: ANN001, ANN202
-            if args and isinstance(args[0], str):
-                args = (tr(args[0]),) + args[1:]
-            elif len(args) > 1 and isinstance(args[1], str):
-                args = (args[0], tr(args[1])) + args[2:]
-            return original_add_menu(self, *args, **kwargs)
+    _patch(QtWidgets.QComboBox, 'addItem', patched_add_item)
+    original_current_text = QtWidgets.QComboBox.setCurrentText
 
-        patched_add_menu._zhcn = True  # type: ignore[attr-defined]
-        QtWidgets.QMenuBar.addMenu = patched_add_menu
+    def patched_current_text(self, text):
+        if _is_app_filter(self) and text in _APP_FILTER_LABELS.values():
+            text = tr(text)
+        return original_current_text(self, text)
 
-    # --- QTabBar.setTabText 之外：QCheckBox/QRadioButton 走 addItem 的也处理
-    #     （Navigator 的自定义 tab 用 QCheckBox 做导航按钮，文案走构造函数已覆盖）
-    _APPLIED = True
+    _patch(QtWidgets.QComboBox, 'setCurrentText', patched_current_text)
 
 
 def install() -> None:
-    """给启动器调用的入口：确保 QApplication 存在后打补丁。"""
+    """Compatibility alias; install before creating Navigator controls."""
     apply()
 
 
 if __name__ == '__main__':
-    # 自检：不启动 GUI，直接验证词表与模板
     apply()
     print('applied =', _APPLIED, '| entries =', len(ZH), '| patterns =', len(_PATTERNS))
     for probe in ('Home', 'Environments', '&File', 'Cancel', ' packages available ',
-                  'numpy', 'base', 'matching "numpy"',
-                  'Creating environment <b>D:\\anaconda3\\envs\\demo</b>'):
+                  'numpy', 'base', 'matching "numpy"'):
         print(repr(probe), '->', repr(tr(probe)))

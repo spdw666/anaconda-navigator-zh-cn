@@ -1,0 +1,47 @@
+name: Windows full regression
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      QT_API: pyside6
+      QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
+      PYTHONDONTWRITEBYTECODE: "1"
+      CONDA_PLUGINS_AUTO_ACCEPT_TOS: "yes"
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          python-version: "3.12"
+          activate-environment: navigator-zhcn
+          auto-activate-base: false
+      - name: Install actual Navigator and JupyterLab
+        run: |
+          conda install --name navigator-zhcn --yes --override-channels --channel defaults anaconda-navigator=2.7.1 jupyterlab=4.5.9 json5
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          conda run --name navigator-zhcn python -m pip install jupyterlab-language-pack-zh-CN==4.5.post3
+          exit $LASTEXITCODE
+      - name: Complete suite (skips are incomplete)
+        run: |
+          conda run --name navigator-zhcn --no-capture-output python _verify_patch.py 2>&1 | Tee-Object -FilePath regression.log
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: regression-log
+          path: regression.log
+          if-no-files-found: ignore

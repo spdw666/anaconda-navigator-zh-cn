@@ -1,144 +1,218 @@
 # -*- coding: utf-8 -*-
-"""把 PyCharm 的安装路径写进 Navigator 配置，修「已安装但显示未安装」。
+"""为 Navigator 配置 PyCharm；用法：python fix_pycharm.py [安装目录] [--config INI]。
 
-Navigator 只在几个固定目录里找 JetBrains 产品：
-    C:\\Program Files\\JetBrains
-    C:\\Program Files (x86)\\JetBrains
-    %LOCALAPPDATA%\\Programs
-    %LOCALAPPDATA%\\JetBrains\\Toolbox\\apps
-装在 D 盘或任意自定义目录时，它找不到，卡片就一直显示「安装」。
-配置文件里的 [applications] 段可以手工指定路径，这个脚本负责发现并写入。
-
-用法（必须用 Anaconda 自带的 python）：
-    D:\\anaconda3\\python.exe fix_pycharm.py            # 自动发现并写入
-    D:\\anaconda3\\python.exe fix_pycharm.py "路径"     # 指定安装目录
+显式目录与自动发现执行相同校验；完整校验 INI 后只改 applications 段。
+缺段/键时补齐，保留已有换行/BOM，首次备份，并在同目录原子替换。
 """
 from __future__ import annotations
 
+import argparse
+import codecs
 import configparser
+import ctypes
 import json
 import os
 import pathlib
-import sys
+import re
+import shutil
+import subprocess
+import tempfile
 
-CONF = pathlib.Path(os.environ['APPDATA']) / '.anaconda' / 'navigator' / 'anaconda-navigator.ini'
-
-# productCode -> 配置键（见 base_apps.yml：PY=专业版，PC=社区版，PE=教育版）
+CONF = pathlib.Path(os.environ.get('APPDATA', pathlib.Path.home() / 'AppData' / 'Roaming')) / '.anaconda' / 'navigator' / 'anaconda-navigator.ini'
 KEY_BY_CODE = {'PY': 'pycharm_pro_path', 'PC': 'pycharm_ce_path', 'PE': 'pycharm_ce_path'}
 
 
-def find_pycharm(explicit: str | None = None) -> pathlib.Path:
-    """定位 PyCharm 安装根目录（含 bin/pycharm64.exe 的那一层）。"""
-    if explicit:
-        return pathlib.Path(explicit)
-
-    candidates: list[pathlib.Path] = []
-
-    # 1) 桌面 / 开始菜单快捷方式（用户自己建的那个最准）
-    for folder in (
-        pathlib.Path.home() / 'Desktop',
-        pathlib.Path(os.environ['APPDATA']) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs',
-    ):
-        for lnk in folder.glob('**/pycharm*.lnk'):
-            candidates.append(lnk)
-
-    # 2) 常见安装位置
-    for drive in 'CDEFG':
-        for name in ('PyCharm', 'PyCharm Community', 'JetBrains'):
-            root = pathlib.Path(f'{drive}:/')
-            if root.is_dir():
-                candidates.extend(root.glob(f'{name}*'))
-                candidates.extend(root.glob(f'Program Files/JetBrains/{name}*'))
-
-    for item in candidates:
-        root = _to_root(item)
-        if root is not None:
-            return root
-
-    raise SystemExit('未找到 PyCharm，请把安装目录作为参数传进来。')
-
-
-def _to_root(item: pathlib.Path) -> pathlib.Path | None:
-    """把快捷方式或目录统一收敛到「含 product-info.json 的根目录」。"""
-    if item.suffix.lower() == '.lnk':
-        target = _read_lnk(item)
-        if target is None:
-            return None
-        item = target.parent.parent if target.parent.name == 'bin' else target
-
-    for probe in (item, item / 'bin' / '..'):
-        probe = probe.resolve()
-        if (probe / 'bin' / 'pycharm64.exe').is_file() and (probe / 'product-info.json').is_file():
-            return probe
-    return None
+def _known_folder(csidl: int) -> pathlib.Path | None:
+    """读取系统已知文件夹，跟随桌面/开始菜单重定向。"""
+    if os.name != 'nt':
+        return None
+    buffer = ctypes.create_unicode_buffer(32768)
+    if ctypes.windll.shell32.SHGetFolderPathW(None, csidl, None, 0, buffer) != 0:
+        return None
+    return pathlib.Path(buffer.value) if buffer.value else None
 
 
 def _read_lnk(lnk: pathlib.Path) -> pathlib.Path | None:
-    """取 .lnk 的目标路径。用 WScript.Shell，避免解析二进制格式。"""
+    """使用系统 PowerShell/COM，不要求额外 Python 模块。"""
+    env = os.environ.copy()
+    env['ANACONDA_ZH_SHORTCUT_PROBE'] = str(lnk)
+    command = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $s=New-Object -ComObject WScript.Shell; $s.CreateShortcut($env:ANACONDA_ZH_SHORTCUT_PROBE).TargetPath | ConvertTo-Json -Compress"
     try:
-        import win32com.client  # type: ignore[import-not-found]
-    except ImportError:
+        result = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
+            env=env, capture_output=True, encoding='utf-8', timeout=15,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        )
+        target = json.loads(result.stdout) if result.returncode == 0 else None
+        return pathlib.Path(target) if isinstance(target, str) and target else None
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
-    shell = win32com.client.Dispatch('WScript.Shell')
-    target = shell.CreateShortCut(str(lnk)).TargetPath
-    return pathlib.Path(target) if target else None
+
+
+def _product_info(root: pathlib.Path) -> dict:
+    data = json.loads((root / 'product-info.json').read_text(encoding='utf-8-sig'))
+    if not isinstance(data, dict) or data.get('productCode') not in KEY_BY_CODE:
+        raise ValueError('product-info.json 缺少受支持的 productCode（PY/PC/PE）')
+    if not isinstance(data.get('version'), str) or not data['version'].strip():
+        raise ValueError('product-info.json 缺少有效 version')
+    return data
+
+
+def _to_root(item: pathlib.Path) -> pathlib.Path | None:
+    """返回包含 executable 和有效元数据的绝对安装根目录。"""
+    try:
+        if item.suffix.lower() == '.lnk':
+            target = _read_lnk(item)
+            if target is None:
+                return None
+            item = target.parent.parent if target.parent.name.lower() == 'bin' else target
+        root = item.expanduser().resolve(strict=True)
+        if not (root / 'bin' / 'pycharm64.exe').is_file():
+            return None
+        _product_info(root)
+        return root
+    except (OSError, ValueError):
+        return None
+
+
+def find_pycharm(explicit: str | None = None) -> pathlib.Path:
+    if explicit:
+        root = _to_root(pathlib.Path(explicit))
+        if root is None:
+            raise SystemExit(f'无效的 PyCharm 安装目录：{explicit}（需 bin/pycharm64.exe 和有效 product-info.json）')
+        return root
+    candidates: list[pathlib.Path] = []
+    for folder in (_known_folder(0x10), _known_folder(0x02)):
+        if folder is not None and folder.is_dir():
+            candidates.extend(folder.glob('**/pycharm*.lnk'))
+    for drive in 'CDEFG':
+        root = pathlib.Path(f'{drive}:/')
+        if root.is_dir():
+            for pattern in ('PyCharm*', 'PyCharm Community*', 'Program Files/JetBrains/PyCharm*'):
+                candidates.extend(root.glob(pattern))
+    for candidate in candidates:
+        root = _to_root(candidate)
+        if root is not None:
+            return root
+    raise SystemExit('未找到有效 PyCharm 安装目录；可将安装根目录作为参数传入。')
 
 
 def read_product_code(root: pathlib.Path) -> str:
-    """读 product-info.json 拿 productCode（PY / PC / PE）。"""
-    data = json.loads((root / 'product-info.json').read_text(encoding='utf-8'))
-    return data.get('productCode', 'PY')
+    return _product_info(root)['productCode']
+
+
+def _parse_ini(raw: str) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.read_string(raw)
+    return parser
 
 
 def write_config(key: str, root: pathlib.Path) -> bool:
-    """把 root 写进 [applications] 段的 key。逐行替换，保持文件其余部分一字不动。"""
+    """section 限定、全文件重复检查、保留换行、首次备份、原子写入。"""
+    valid = _to_root(root)
+    if valid is None:
+        raise SystemExit(f'无效的 PyCharm 安装目录：{root}')
+    root = valid
+    if key != KEY_BY_CODE[read_product_code(root)]:
+        raise SystemExit('配置键与 PyCharm productCode 不匹配')
     if not CONF.is_file():
         raise SystemExit(f'配置文件不存在：{CONF}\n请先启动一次 Anaconda Navigator。')
-
-    # newline='' 保留原始 \r\n —— 默认的通用换行会把 CRLF 折成 \n，写回就毁了文件
-    with CONF.open('r', encoding='utf-8', newline='') as stream:
-        raw = stream.read()
-    newline = '\r\n' if '\r\n' in raw else '\n'
-    lines = raw.split(newline)
-    wanted = f'{key} = {root}'
-    hits = 0
-
+    original = CONF.read_bytes()
+    raw = original.decode('utf-8-sig')
+    try:
+        parser = _parse_ini(raw)
+    except configparser.Error as error:
+        raise SystemExit(f'配置格式校验失败，原文件未改：{error}') from error
+    previous = parser.get('applications', key, raw=True, fallback=None)
+    match = re.search(r'\r\n|\n|\r', raw)
+    newline = match.group() if match else os.linesep
+    lines = raw.splitlines(keepends=True)
+    section = None
+    section_start = section_end = matched = None
     for index, line in enumerate(lines):
-        if line.split(' = ')[0].strip() == key:
-            if line == wanted:
-                print(f'已是目标值，无需修改：{line}')
-                return False
-            print(f'替换：{line!r}\n  ->  {wanted!r}')
-            lines[index] = wanted
-            hits += 1
-
-    if hits != 1:
-        raise SystemExit(f'[applications] 段里没有找到唯一的 {key}，中止（命中 {hits} 处）')
-
+        header = re.match(r'^\s*\[([^\]]+)\]', line)
+        if header:
+            if section == 'applications' and section_end is None:
+                section_end = index
+            section = header.group(1)
+            if section == 'applications':
+                section_start = index
+            continue
+        option = re.match(r'^[ \t]*([^#;\s][^:=]*?)[ \t]*[=:]', line)
+        if section == 'applications' and option and option.group(1).strip().lower() == key.lower():
+            matched = index
+    # Only local options count: ConfigParser.get() also inherits [DEFAULT].
+    if matched is not None and previous is not None and ('\r' in previous or '\n' in previous):
+        raise SystemExit(f'[applications] 的 {key} 是多行值，原文件未改')
+    # strict 解析已完成，重复键不会因第一项已等于目标值而漏检。
+    if matched is not None and previous == str(root):
+        print(f'已是目标值，无需修改：{key} = {root}')
+        return False
+    wanted = f'{key} = {root}'
+    if matched is not None:
+        suffix = re.search(r'(\r\n|\n|\r)$', lines[matched])
+        lines[matched] = wanted + (suffix.group() if suffix else '')
+    elif section_start is not None:
+        insert_at = section_end if section_end is not None else len(lines)
+        if insert_at and not lines[insert_at - 1].endswith(('\r', '\n')):
+            lines[insert_at - 1] += newline
+        lines.insert(insert_at, wanted + newline)
+    else:
+        if lines and not lines[-1].endswith(('\r', '\n')):
+            lines[-1] += newline
+        lines.extend(['[applications]' + newline, wanted + newline])
+    changed = ''.join(lines)
+    if _parse_ini(changed).get('applications', key, raw=True) != str(root):
+        raise SystemExit('配置写入前读回校验失败，原文件未改')
+    payload = (codecs.BOM_UTF8 if original.startswith(codecs.BOM_UTF8) else b'') + changed.encode('utf-8')
     backup = CONF.with_suffix('.ini.bak_fix_pycharm')
-    if not backup.exists():
-        backup.write_bytes(CONF.read_bytes())
+    try:
+        with backup.open('xb') as stream:
+            stream.write(original)
+            stream.flush()
+            os.fsync(stream.fileno())
         print(f'已备份：{backup}')
-
-    with CONF.open('w', encoding='utf-8', newline='') as stream:
-        stream.write(newline.join(lines))
+    except FileExistsError:
+        pass
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=CONF.parent, prefix=CONF.name + '.', suffix='.tmp', delete=False) as stream:
+            temporary = pathlib.Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        shutil.copymode(CONF, temporary)
+        if CONF.read_bytes() != original:
+            raise SystemExit('配置已被其它进程更新，写入已中止；请关闭 Navigator 后重试')
+        os.replace(temporary, CONF)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    if CONF.read_bytes() != payload:
+        raise SystemExit('配置保存后字节校验失败')
+    print(f'已更新 [applications]：{wanted}')
     return True
 
 
 def main() -> None:
-    root = find_pycharm(sys.argv[1] if len(sys.argv) > 1 else None)
-    code = read_product_code(root)
-    key = KEY_BY_CODE.get(code)
-    if key is None:
-        raise SystemExit(f'未知的 productCode {code!r}（{root}）')
-
-    print(f'安装目录：{root}')
-    print(f'版本    ：{json.loads((root / "product-info.json").read_text(encoding="utf-8"))["version"]}')
-    print(f'productCode = {code} -> 写 {key}\n')
-
+    global CONF
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('path', nargs='?', help='PyCharm 安装根目录（支持相对路径）')
+    parser.add_argument('--config', type=pathlib.Path, help='Navigator INI 路径')
+    args = parser.parse_args()
+    if args.config:
+        CONF = args.config.expanduser().resolve()
+    root = find_pycharm(args.path)
+    info = _product_info(root)
+    key = KEY_BY_CODE[info['productCode']]
+    print(f'安装目录：{root}\n版本：{info["version"]}\nproductCode = {info["productCode"]} -> {key}')
     if write_config(key, root):
-        print('\n完成。重启 Anaconda Navigator 即可看到「启动」按钮。')
+        print('配置已验证保存；重启 Anaconda Navigator 后重新探测。')
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (OSError, ValueError) as error:
+        raise SystemExit(f'错误：{error}') from error

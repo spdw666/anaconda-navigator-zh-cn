@@ -11,3 +11,9 @@ _*.png
 _*.cmd
 _trace.log
 _probe_*.py
+
+# Config backups, temporary replacements and CI logs
+*.bak_zhcn
+*.bak_fix_pycharm
+*.tmp
+regression.log
