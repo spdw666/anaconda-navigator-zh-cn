@@ -10,3 +10,4 @@ _*.txt
 _*.png
 _*.cmd
 _trace.log
+_probe_*.py

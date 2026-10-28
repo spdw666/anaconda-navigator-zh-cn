@@ -80,6 +80,29 @@ _PATTERN_SPECS: typing.Final[typing.Sequence[typing.Tuple[str, str]]] = (
     #   命中（开头不同），所以两条可以并存，顺序无所谓；仍按先长后短排列。
     (r'Partially connected to ([\s\S]*)', '部分连接到 \\1'),
     (r'Connected to ([\s\S]*)', '已连接到 \\1'),
+    # widgets/lists/apps.py:338  self.button_version.setToolTip(f'Version {self.versions[-1]} available')
+    #   首页应用卡片右上角「↗ 4.5.9」的鼠标提示，原文是 f-string 拼接。
+    (r'Version ([^\s]+) available', '可更新到 \\1'),
+    # widgets/dialogs/update.py:45-51  Navigator 自身更新提示（QLabel 多行拼接）
+    #   两种变体：is_root_writable=False 时 extra_text 会多插一句权限提示。
+    #   先长后短：带权限提示的在前面，不带提示的短串在后面。
+    (r"There's a new version of Anaconda Navigator available\. "
+     r'We strongly recommend you to update\. <br><br>'
+     r'If you click yes, Anaconda Navigator will close and then the '
+     r'Anaconda Navigator Updater will start\.<br><br><br>'
+     r'Do you wish to update to <b>Anaconda Navigator (.*?)</b> now\?'
+     r'<br><br>\(You will be prompted to elevate privileges\)<br><br>',
+     'Anaconda 导航器有新版本可用，强烈建议更新。<br><br>'
+     '点击「是」后，Anaconda 导航器将关闭，随后启动 Anaconda 导航器更新器。<br><br><br>'
+     '是否现在更新到 <b>Anaconda 导航器 \\1</b>？<br><br>（会提示你提升权限）<br><br>'),
+    (r"There's a new version of Anaconda Navigator available\. "
+     r'We strongly recommend you to update\. <br><br>'
+     r'If you click yes, Anaconda Navigator will close and then the '
+     r'Anaconda Navigator Updater will start\.<br><br><br>'
+     r'Do you wish to update to <b>Anaconda Navigator (.*?)</b> now\?<br><br>',
+     'Anaconda 导航器有新版本可用，强烈建议更新。<br><br>'
+     '点击「是」后，Anaconda 导航器将关闭，随后启动 Anaconda 导航器更新器。<br><br><br>'
+     '是否现在更新到 <b>Anaconda 导航器 \\1</b>？<br><br>'),
 )
 
 _PATTERNS: typing.Final[typing.Sequence[typing.Tuple[typing.Pattern[str], str]]] = tuple(
