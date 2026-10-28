@@ -1,0 +1,5 @@
+Qt qttranslations: unmodified upstream Simplified Chinese QtBase catalog.
+Copyright belongs to the Qt Project contributors and The Qt Company Ltd.
+The upstream licenseRule.json and license texts accompany this source catalog.
+The repository MIT license does not replace upstream terms for these files.
+Pinned upstream source and SHA-256 values are recorded in UPSTREAM.json.

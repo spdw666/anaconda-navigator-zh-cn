@@ -1,0 +1,2 @@
+# Preserve exact pinned upstream bytes and provenance hashes across Windows checkouts.
+assets/qttranslations/* -text

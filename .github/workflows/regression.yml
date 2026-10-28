@@ -39,9 +39,16 @@ jobs:
         run: |
           conda run --name navigator-zhcn --no-capture-output python _verify_patch.py 2>&1 | Tee-Object -FilePath regression.log
           exit $LASTEXITCODE
+      - name: Independent public-content coverage audit
+        run: |
+          conda run --name navigator-zhcn --no-capture-output python coverage_audit.py --report coverage-report.json 2>&1 | Tee-Object -FilePath coverage.log
+          exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: regression-log
-          path: regression.log
+          path: |
+            regression.log
+            coverage.log
+            coverage-report.json
           if-no-files-found: ignore

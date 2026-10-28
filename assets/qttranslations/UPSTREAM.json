@@ -1,0 +1,23 @@
+{
+  "project": "qt/qttranslations",
+  "ref": "6.11",
+  "commit": "41b114145cefe539177ebafe7758a2d287123ac8",
+  "files": {
+    "qtbase_zh_CN.ts": {
+      "source": "https://raw.githubusercontent.com/qt/qttranslations/41b114145cefe539177ebafe7758a2d287123ac8/translations/qtbase_zh_CN.ts",
+      "sha256": "e63a70eedd900438ec1c63877c525bcda5c8292803bf0e228995de09fb9ddeb7"
+    },
+    "licenseRule.json": {
+      "source": "https://raw.githubusercontent.com/qt/qttranslations/41b114145cefe539177ebafe7758a2d287123ac8/licenseRule.json",
+      "sha256": "bd3dd93fa56f54bd5ab78e4209f1dd7d2d27c41d65945db064e6e267b39c009c"
+    },
+    "GPL-3.0-only.txt": {
+      "source": "https://raw.githubusercontent.com/qt/qttranslations/41b114145cefe539177ebafe7758a2d287123ac8/LICENSES/GPL-3.0-only.txt",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    },
+    "LicenseRef-Qt-Commercial.txt": {
+      "source": "https://raw.githubusercontent.com/qt/qttranslations/41b114145cefe539177ebafe7758a2d287123ac8/LICENSES/LicenseRef-Qt-Commercial.txt",
+      "sha256": "9b1f50aae6267f9d5e0ceb6775ee86450262c25ec7c0573e151fe5d3f18a4700"
+    }
+  }
+}

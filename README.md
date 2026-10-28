@@ -71,7 +71,8 @@ if ($LASTEXITCODE -ne 0) { throw '快捷方式安装未完成' }
 ```
 
 通过 `cwp.py` 配置 Anaconda 的 DLL/PATH 环境。已收录文案包括主页/环境/学习/社区、
-菜单、静态按钮、包管理状态提示与部分对话框。未收录文案保留原文。
+菜单、包管理提示、对话框，以及已盘点的应用介绍、课程标题、摘要、内容按钮和分类图片。
+具体覆盖与保留数据见下文；云端新增内容可用独立审计命令检查。
 
 ## 2. 还原英文与迁移
 
@@ -95,13 +96,30 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$Patch\manage_shortcuts
 
 ## 3. 翻译与数据分离
 
-引擎包含 216 条精确词条、28 条动态文案规则及富文本锚文字翻译。
+引擎按字段语义区分界面文案与逻辑数据，当前资源包括：
+
+| 资源 | 覆盖内容 |
+|---|---|
+| 基础词条 216 条 + 补充词条 164 条 | 导航、菜单、设置、登录、导入/备份、包管理、提示和对话框 |
+| 动态规则 46 条 | 启动/安装/更新/移除、环境操作、下载、账号计数、路径提示等 |
+| 公共内容词条 265 条 | 应用说明、课程/文档/社区标题与摘要、访问按钮及保留的产品名 |
+| 官方 QtBase 中文词条 1,785 条 | Qt 原生消息框、文件选择框、编辑菜单等，保留 Qt 上下文和占位符 |
+| 本地中文 SVG 10 张 | 课程、学习路径、认证等分类图与已识别的快速起步侧栏图片 |
+
+公共内容使用完整显示字段匹配；富文本只改文字节点，不改标签、属性或链接。
+中文搜索同时匹配原文及译文，保留原类别筛选行为。
 
 - **实际输入保持原文**：不包装 QLineEdit/QTextEdit 等的内容 `setText`，placeholder、tooltip 可翻译。
 - **环境名保持原文**：通用组合框、首页环境组合框、环境名按钮及其自绘菜单不翻译数据。
 - **应用筛选限定控件**：只翻译 Navigator `ComboHomeFilter` 的四组固定 label/data 配对；
   `userData` 不变，程序化 `setCurrentText` 与中文标签同步。
-- **包状态筛选保持英文**：`Installed / Not installed / Updatable / Selected / All` 供原逻辑查字典。
+- **包状态筛选只改显示**：显示“已安装/未安装/可更新/已选择/全部”；
+  `currentText()`、项目数据与状态查表键仍为 `Installed / Not installed / Updatable / Selected / All`。
+- **文件筛选只改显示**：翻译人类可读标签，保留 `*.yaml` 等模式；返回原始所选筛选值，
+  使 Navigator 的 YAML 扩展名判断仍使用原键。
+- **内容与图片只改显示**：应用 ID、元数据标题/摘要原值、URI、图片源、跳转目标及点击行为不变。
+- **保留产品与技术标识**：Anaconda、PyCharm、JupyterLab、Conda-Forge 等品牌，Python/SQL/AI 等术语，
+  包名、版本、环境名、账号名、路径、URL 与原始诊断数据不作为普通 UI 文案改写。
 - **方法安装是事务**：安装失败撤销已替换方法；`uninstall()` 恢复原属性及继承关系。
 - **无控制台也能回退**：`pythonw.exe` 缺少 stderr 时，诊断输出不阻断官方英文入口。
 
@@ -168,6 +186,10 @@ Spyder 自带中文资源与本项目无关。在带有中文资源的 Spyder �
 | 文件 | 用途 |
 |---|---|
 | nav_zh_dict.py / zhcn_boot.py | 词表与事务式 Qt 文案补丁 |
+| nav_content.py / content_zh.json / ui_zh_extra.json | 语义限定的内容、原生 Qt、文件筛选与中文搜索 |
+| nav_assets.py / assets/zh_cn/ | 已识别的官方分类与侧栏图片的中文显示资源 |
+| assets/qttranslations/ | 固定版本的官方 QtBase 资源、上游许可证和来源哈希 |
+| coverage_audit.py / coverage_catalog.json | 独立公共内容快照审计及当前缓存的新增英文检测 |
 | launch_zh.py | 中文启动器，失败进入官方英文入口 |
 | manage_shortcuts.ps1 | 快捷方式安装、备份、还原及读回验证 |
 | 安装汉化.cmd / 还原英文.cmd | 对应 PowerShell 操作封装 |
@@ -182,11 +204,51 @@ $LASTEXITCODE
 ```
 
 覆盖：原 38 项语义、环境名撞词/粘贴、真实 Navigator 控件、Qt 重载、幂等安装/完整撤销、
-阶段故障注入、真实 pythonw、跨工作目录的被测对象定位、配置段与路径、真实 Windows COM
+53 个安装阶段的前后故障注入、真实 pythonw、跨工作目录的被测对象定位、配置段与路径、真实 Windows COM
 快捷方式夹具，以及 JupyterLab 原生 locale 解析。配置和快捷方式测试仅写入临时目录。
+
+当前完整套件为 **85 项，零跳过**，包含独立输入快照、原生卡片、摘要悬浮层、中文搜索、
+分类图片、文件筛选逻辑、包筛选绘制、动态消息及用户数据保持测试。
+测试在临时用户目录中运行，不写真实 Navigator 或 Jupyter 配置。
+
+### 公共内容覆盖审计
+
+```powershell
+# 仓库中独立的已盘点快照，不读取真实用户配置
+& "$Anaconda\python.exe" "$Patch\coverage_audit.py" --report "$env:TEMP\navigator-coverage.json"
+
+# 可选：同时检查当前 Navigator 下载的公共内容缓存
+& "$Anaconda\python.exe" "$Patch\coverage_audit.py" `
+  --live-content "$env:APPDATA\.anaconda\navigator\content\content.json" `
+  --report "$env:TEMP\navigator-live-coverage.json"
+```
+
+`coverage_catalog.json` 的 2026-10-28 快照包含内置 51 条及当时缓存 99 条内容
+（合计 104 个不同标题、99 个不同摘要）、28 个内置应用定义、32 个远端应用定义及 6 个 conda 应用。
+独立审计 528 个显示字段：495 个翻译字段、33 个重复出现的产品名字段，未收录为 0。
+加入当时 99 条实时缓存后，共 778 个字段，未收录仍为 0。
+产品名称计入已明确保留，不以“任何英文都必须消失”作为通过标准。
+审计遇到未收录的新英文标题、摘要或按钮会返回非零退出码并列入 `missing`；
+仓库快照通过不代表未来云端新增内容已覆盖。
+
+另以相同公共输入在补丁前后分别回放原生主页、学习、社区、环境及消息/文件对话框：
+主页 15 条应用说明、学习 82 条、社区 17 条内容和 54 张训练分类图已核对。
+该页面回放使用隔离配置、真实 Navigator 控件及受控网络/API 输入；
+它不等同于用户正在运行的完整 MainWindow 的所有交互逐项实测。
 
 补词条后完整自检，并检查新词是否可能是用户数据。
 设置 `ANACONDA_ZH_TRACE` 可记录去重后的实际翻译命中；诊断日志不上传仓库。
+
+## 资源来源与许可证
+
+项目代码遵循根目录 `LICENSE`。本地中文分类和侧栏 SVG 由项目生成，
+分类图保留原有 Anaconda 品牌图形；产品商标与品牌权利归各自权利人。
+
+Qt 原生翻译来自 [Qt 官方 qttranslations](https://github.com/qt/qttranslations)，
+固定为 Qt 6.11 分支提交 `41b114145cefe539177ebafe7758a2d287123ac8` 的原始 `qtbase_zh_CN.ts`。
+本项目通过上下文匹配读取有效译文，不修改该上游文件，不把未完成或占位符不符的译文装入运行时。
+上游资源适用自己的许可证，根目录项目许可不覆盖它；
+参阅 `assets/qttranslations/NOTICE.txt`、`licenseRule.json`、许可证全文和 `UPSTREAM.json` 中的来源与 SHA-256。
 
 ## 项目说明
 

@@ -20,6 +20,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from nav_zh_dict import ZH  # noqa: E402
+from nav_content import tr_ui, tr_rich_ui, display_text, is_package_filter, install_content_hooks, remove_qt_translator
 
 
 # 拼接型文案：源码里是 f-string / .format()，只能按整串模板匹配。
@@ -73,6 +74,26 @@ _PATTERN_SPECS: typing.Final[typing.Sequence[typing.Tuple[str, str]]] = (
     # widgets/lists/apps.py:338  self.button_version.setToolTip(f'Version {self.versions[-1]} available')
     #   首页应用卡片右上角「↗ 4.5.9」的鼠标提示，原文是 f-string 拼接。
     (r'Version ([^\s]+) available', '可更新到 \\1'),
+    (r'Application <b>(.*?)</b> launch may have produced errors\.', '应用 <b>\\1</b> 启动时可能产生错误。'),
+    (r"Create new environment for '(.*?)'", '为“\\1”创建新环境'),
+    (r'Clone from environment: ([\s\S]*)', '克隆自环境：\\1'),
+    (r'Open with ([\s\S]*)', '使用 \\1 打开'),
+    (r'Environment file "(.*?)" downloaded to ([\s\S]*)', '环境文件“\\1”已下载到 \\2'),
+    (r'Path to configuration file: ([\s\S]*)', '配置文件路径：\\1'),
+    (r'<b>(.*?)</b> is not a valid conda channel\.', '<b>\\1</b> 不是有效的 conda 频道。'),
+    (r'Launching <b>(.*?)</b>', '正在启动 <b>\\1</b>'),
+    (r'Installing application <b>(.*?)</b> in new a environment <b>(.*?)</b>',
+     '正在新环境 <b>\\2</b> 中安装应用 <b>\\1</b>'),
+    (r'Installing application <b>(.*?)</b> on <b>(.*?)</b>', '正在向 <b>\\2</b> 安装应用 <b>\\1</b>'),
+    (r'Install application <b>(.*?)</b> on <b>(.*?)</b>', '正在向 <b>\\2</b> 安装应用 <b>\\1</b>'),
+    (r'Updating application <b>(.*?)</b> on <b>(.*?)</b>', '正在更新 <b>\\2</b> 中的应用 <b>\\1</b>'),
+    (r'Removing application <b>(.*?)</b> from <b>(.*?)</b>', '正在从 <b>\\2</b> 移除应用 <b>\\1</b>'),
+    (r'Directory path where (.*?) is installed on your machine\.\s+To see \1 on the home tab, you will also need to click\s+the Refresh button on the home tab\.',
+     '\\1 在本机的安装目录。要在主页中看到 \\1，还需要点击主页上的刷新按钮。'),
+    (r'((?:PyCharm(?: Community| Professional)?|VS Code|Kilo Desktop|DataSpell)) path', '\\1 路径'),
+    (r'(<span\b[^>]*>)No environments available for ([^<>]*)(</span>)', '\\1\\2 没有可用环境\\3'),
+    (r'(<span\b[^>]*>)(\d+) environments? available for ([^<>]*)(</span>)', '\\1\\3 有 \\2 个可用环境\\4'),
+    (r'(<span\b[^>]*>)You are signed in as ([^<>]*)(</span>)', '\\1你当前登录的账号是 \\2\\3'),
     # widgets/dialogs/update.py:45-51  Navigator 自身更新提示（QLabel 多行拼接）
     #   两种变体：is_root_writable=False 时 extra_text 会多插一句权限提示。
     #   先长后短：带权限提示的在前面，不带提示的短串在后面。
@@ -122,6 +143,24 @@ def tr(text: typing.Any) -> typing.Any:
         _trace(text, hit)
         return hit
 
+    extra = tr_ui(text)
+    if extra != text:
+        _trace(text, extra)
+        return extra
+    counted = re.fullmatch(r'(Documentation|Training|Webinar|Event|Forum|Social|Video)\s*\((\d+)\)', text)
+    if counted:
+        labels = {'Documentation': '文档', 'Training': '培训', 'Webinar': '在线讲座',
+                  'Event': '活动', 'Forum': '论坛', 'Social': '社交', 'Video': '视频'}
+        out = f'{labels[counted.group(1)]}（{counted.group(2)}）'
+        _trace(text, out)
+        return out
+    if re.fullmatch(r'(?:\s*\d+ packages? will be (?:modified|removed|installed)\s*)+', text):
+        actions = {'modified': '修改', 'removed': '移除', 'installed': '安装'}
+        out = '；'.join(f'将{actions[action]} {count} 个包'
+                       for count, action in re.findall(r'(\d+) packages? will be (modified|removed|installed)', text))
+        _trace(text, out)
+        return out
+
     # 累积替换：模板里既有「前缀 + 变量」也有「整串状态栏」，
     # 一条串可能需要多条规则接力（如「已连接到」+ 锚文本里的「云端」）。
     # _PATTERN_SPECS 已按先长后短排列，长规则先吃掉，短规则不会重复命中。
@@ -136,6 +175,12 @@ def tr(text: typing.Any) -> typing.Any:
     if anchor_out != out:
         out = anchor_out
         changed = True
+
+    if '<' in out and '>' in out:
+        rich_out = tr_rich_ui(out)
+        if rich_out != out:
+            out = rich_out
+            changed = True
 
     if changed:
         _trace(text, out)
@@ -205,6 +250,8 @@ def _preserve_data_text(widget: typing.Any, args: tuple = (), kwargs: dict | Non
             seen.add(id(candidate))
             if any(cls.__name__ == 'QComboBox' and cls.__module__ == 'PySide6.QtWidgets'
                    for cls in type(candidate).__mro__):
+                if is_package_filter(candidate):
+                    return False  # popup action labels are presentation, not currentText()
                 return not _is_app_filter(candidate)
             try:
                 candidate = candidate.parent()
@@ -229,6 +276,7 @@ def _patch(cls: type, name: str, replacement: typing.Any) -> None:
 def uninstall() -> None:
     """Restore exact pre-install attributes, including inherited ownership."""
     global _APPLIED
+    remove_qt_translator()
     remaining = []
     errors = []
     for cls, name, owned, original in reversed(_PATCHES):
@@ -274,11 +322,11 @@ def _install_patches() -> None:
                 return original(self, *args, **kwargs)
             if len(args) > index:
                 changed = list(args)
-                changed[index] = tr(changed[index])
+                changed[index] = display_text(self, changed[index], tr)
                 args = tuple(changed)
             for key in ('text', 'title', 'label', 'caption', 'message'):
                 if key in kwargs:
-                    kwargs[key] = tr(kwargs[key])
+                    kwargs[key] = display_text(self, kwargs[key], tr)
             return original(self, *args, **kwargs)
 
         patched._zhcn = True
@@ -340,12 +388,12 @@ def _install_patches() -> None:
                 changed = list(args)
                 for index in range(min(2, len(changed))):
                     if isinstance(changed[index], str):
-                        changed[index] = tr(changed[index])
+                        changed[index] = display_text(self, changed[index], tr)
                         break
                 args = tuple(changed)
                 for key in ('text', 'title'):
                     if key in kwargs:
-                        kwargs[key] = tr(kwargs[key])
+                        kwargs[key] = display_text(self, kwargs[key], tr)
             return original(self, *args, **kwargs)
 
         patched._zhcn = True
@@ -383,6 +431,7 @@ def _install_patches() -> None:
         return original_current_text(self, text)
 
     _patch(QtWidgets.QComboBox, 'setCurrentText', patched_current_text)
+    install_content_hooks(_patch)
 
 
 def install() -> None:

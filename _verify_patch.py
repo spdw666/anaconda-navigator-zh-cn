@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import unittest
+import tempfile
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -29,10 +30,24 @@ def main(argv=None):
     if argv:
         print('Usage: _verify_patch.py [--engine-info]', file=sys.stderr)
         return 2
-    suite = unittest.defaultTestLoader.discover(
-        str(ROOT / 'tests'), pattern='test_*.py', top_level_dir=str(ROOT),
-    )
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    # Content integration imports Navigator modules. Isolate the entire suite,
+    # including module discovery, before any real Navigator config is imported.
+    keys = ('HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'JUPYTER_CONFIG_DIR', 'JUPYTERLAB_SETTINGS_DIR')
+    previous = {key: os.environ.get(key) for key in keys}
+    try:
+        with tempfile.TemporaryDirectory(prefix='zhcn-suite-', dir=ROOT.parent) as temporary:
+            for key in keys:
+                os.environ[key] = temporary
+            suite = unittest.defaultTestLoader.discover(
+                str(ROOT / 'tests'), pattern='test_*.py', top_level_dir=str(ROOT),
+            )
+            result = unittest.TextTestRunner(verbosity=2).run(suite)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     if result.wasSuccessful() and result.skipped:
         print('=== INCOMPLETE: {} TESTS SKIPPED; install the full test dependencies ==='.format(
             len(result.skipped)), flush=True)
