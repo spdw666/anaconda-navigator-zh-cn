@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 本机运行产物（不该进仓库）
+shortcut_backup/
+_*.log
+_*.txt
+_*.png
+_*.cmd
+_trace.log
